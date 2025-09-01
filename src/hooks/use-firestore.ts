@@ -349,28 +349,12 @@ export function useDashboardStats() {
     const { user } = useAuth();
     const [stats, setStats] = useState<DashboardStats>({ subjectsCompleted: 0, averageScore: 0, studyStreak: 0, weeklyActivity: [] });
     const [loading, setLoading] = useState(true);
-    const [allAssignments, setAllAssignments] = useState<Assignment[]>([]);
-
-    useEffect(() => {
-        if (!user) {
-            setLoading(false);
-            return;
-        }
-
-        const assignmentsQuery = query(collection(db, 'assignments'), where('userId', '==', user.uid));
-        const unsubAssignments = onSnapshot(assignmentsQuery, (snapshot) => {
-            const assignmentsList = snapshot.docs.map(doc => ({id: doc.id, ...doc.data() as Omit<Assignment, 'id'>}));
-             setAllAssignments(assignmentsList as Assignment[]);
-        });
-
-        return () => unsubAssignments();
-
-    }, [user]);
+    const { assignments, loading: assignmentsLoading } = useAssignments();
 
     const calculateStats = useCallback((subjects: Subject[], userStats: UserStats | null) => {
         const subjectsCompleted = subjects.length; 
         
-        const gradedAssignments = allAssignments.filter(a => a.status === 'Completed' && a.grade !== null && a.grade !== undefined);
+        const gradedAssignments = assignments.filter(a => a.status === 'Completed' && a.grade !== null && a.grade !== undefined);
         const averageScore = gradedAssignments.length > 0 
             ? gradedAssignments.reduce((acc, a) => acc + (a.grade || 0), 0) / gradedAssignments.length
             : 0;
@@ -406,11 +390,11 @@ export function useDashboardStats() {
             weeklyActivity,
         });
         setLoading(false);
-    }, [allAssignments]);
+    }, [assignments]);
 
     useEffect(() => {
-        if (!user) {
-            setLoading(false);
+        if (!user || assignmentsLoading) {
+            if (!user) setLoading(false);
             return;
         }
 
@@ -423,58 +407,69 @@ export function useDashboardStats() {
             const unsubUserStats = onSnapshot(userStatsDocRef, (statsSnap) => {
                 const userStats = statsSnap.exists() ? statsSnap.data() as UserStats : null;
                 calculateStats(subjects, userStats);
-            }, () => setLoading(false));
+            }, (err) => {
+                console.error("Error fetching user stats", err);
+                setLoading(false)
+            });
 
             return () => unsubUserStats();
-        }, () => setLoading(false));
+        }, (err) => {
+             console.error("Error fetching subjects", err);
+             setLoading(false);
+        });
 
         // Update Study Streak and log a session on load
         (async () => {
             if (!user) return;
             const userStatsDocRef = doc(db, 'userStats', user.uid);
-            const statsSnap = await getDoc(userStatsDocRef);
-            const batch = writeBatch(db);
+            try {
+                 const statsSnap = await getDoc(userStatsDocRef);
+                const batch = writeBatch(db);
 
-            let newStreak = 1;
-             if (statsSnap.exists()) {
-                const data = statsSnap.data() as UserStats;
-                const lastStudied = data.lastStudiedDate.toDate();
-                const today = new Date();
-                
-                if (!isSameDay(lastStudied, today)) {
-                     if (isSameDay(lastStudied, subDays(today, 1))) {
-                        newStreak = (data.studyStreak || 0) + 1; // Continue streak
+                let newStreak = 1;
+                if (statsSnap.exists()) {
+                    const data = statsSnap.data() as UserStats;
+                    const lastStudied = data.lastStudiedDate.toDate();
+                    const today = new Date();
+                    
+                    if (!isSameDay(lastStudied, today)) {
+                        if (isSameDay(lastStudied, subDays(today, 1))) {
+                            newStreak = (data.studyStreak || 0) + 1; // Continue streak
+                        }
+                        // else, streak resets to 1 (already default)
+
+                        // Update stats
+                        batch.update(userStatsDocRef, {
+                            studyStreak: newStreak,
+                            lastStudiedDate: Timestamp.now(),
+                        });
+                        // Log a "study session" of 1 hour for today
+                        const newSession = { date: Timestamp.now(), duration: 1 };
+                        batch.update(userStatsDocRef, { studySessions: arrayUnion(newSession) });
+
                     }
-                    // else, streak resets to 1 (already default)
-
-                    // Update stats
-                    batch.update(userStatsDocRef, {
-                        studyStreak: newStreak,
+                } else {
+                    // Create new stats doc
+                    batch.set(userStatsDocRef, {
+                        userId: user.uid,
+                        studyStreak: 1,
                         lastStudiedDate: Timestamp.now(),
+                        studySessions: [{ date: Timestamp.now(), duration: 1 }],
                     });
-                     // Log a "study session" of 1 hour for today
-                    const newSession = { date: Timestamp.now(), duration: 1 };
-                    batch.update(userStatsDocRef, { studySessions: [...(data.studySessions || []), newSession] });
-
                 }
-            } else {
-                 // Create new stats doc
-                 batch.set(userStatsDocRef, {
-                    userId: user.uid,
-                    studyStreak: 1,
-                    lastStudiedDate: Timestamp.now(),
-                    studySessions: [{ date: Timestamp.now(), duration: 1 }],
-                 });
+                
+                await batch.commit();
+            } catch (err) {
+                 console.error("Error updating study streak", err);
             }
-            
-            await batch.commit();
+           
         })();
 
 
         return () => unsubSubjects();
-    }, [user, calculateStats, allAssignments]);
+    }, [user, assignmentsLoading, calculateStats]);
     
-    return { stats, loading, assignments: allAssignments };
+    return { stats, loading, assignments };
 }
 
 // --- Timetable ---
@@ -605,13 +600,39 @@ export function useTimetable(type?: TimetableType) {
   };
 
   const deleteTimeSlot = async (slotToDelete: TimeSlot) => {
-    if (!user || !settingsDocId) return;
-    const docRef = doc(db, 'userTimetableSettings', settingsDocId);
-    await updateDoc(docRef, {
+    if (!user || !settingsDocId) throw new Error("User or settings not found");
+
+    const batch = writeBatch(db);
+
+    // 1. Delete associated timetable entries
+    const entriesQuery = query(
+        collection(db, 'timetableEntries'),
+        where('userId', '==', user.uid),
+        where('type', '==', 'lecture'),
+        where('startTime', '==', slotToDelete.start)
+    );
+    const entriesSnapshot = await getDocs(entriesQuery);
+    entriesSnapshot.forEach(doc => {
+      // Additional check to be safe, though query should handle it
+      if (doc.data().endTime === slotToDelete.end) {
+        batch.delete(doc.ref);
+      }
+    });
+
+    // 2. Remove the time slot from the settings document
+    const settingsRef = doc(db, 'userTimetableSettings', settingsDocId);
+    batch.update(settingsRef, {
       timeSlots: arrayRemove(slotToDelete)
     });
+
+    // 3. Commit the batch
+    await batch.commit();
   };
 
 
   return { entries, loading, addTimetableEntry, updateTimetableEntry, deleteTimetableEntry, timeSlots, addTimeSlot, deleteTimeSlot };
 }
+
+
+
+    
