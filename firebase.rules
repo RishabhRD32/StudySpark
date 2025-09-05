@@ -1,0 +1,63 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+  
+    match /users/{userId} {
+      allow read, update, create: if request.auth.uid == userId;
+    }
+
+    match /userStats/{userId} {
+      allow read, update, create: if request.auth.uid == userId;
+    }
+
+    match /userTimetableSettings/{userId} {
+      allow list: if request.auth.uid != null && request.query.where[0][2] == request.auth.uid;
+      allow read, update, create: if request.auth.uid == userId;
+    }
+
+    match /subjects/{subjectId} {
+      // Allow read for anyone to support public material search
+      allow read: if true;
+
+      // Allow authenticated users to list their own subjects
+      allow list: if request.auth != null && request.query.where.userId == request.auth.uid;
+      
+      // Allow write operations only for the owner
+      allow create, update, delete: if request.auth.uid == request.resource.data.userId;
+    }
+
+    match /assignments/{assignmentId} {
+      allow read, create, update, delete: if request.auth.uid == resource.data.userId
+        || request.auth.uid == request.resource.data.userId;
+      allow list: if request.auth != null && request.query.where.userId == request.auth.uid;
+    }
+    
+    match /timetableEntries/{entryId} {
+       allow read, create, update, delete: if request.auth.uid == resource.data.userId
+        || request.auth.uid == request.resource.data.userId;
+       allow list: if request.auth != null && request.query.where.userId == request.auth.uid;
+    }
+    
+    match /studyMaterials/{materialId} {
+      // Allow public read on materials marked as public
+      allow read: if resource.data.isPublic == true || request.auth.uid == resource.data.userId;
+      
+      // Allow anyone to list public materials
+      allow list: if request.query.where.isPublic == true;
+      
+      // Allow authenticated users to list their own materials
+      allow list: if request.auth != null && request.query.where.userId == request.auth.uid;
+
+      // Allow write operations only for the owner
+      allow create: if request.auth.uid == request.resource.data.userId;
+      allow update, delete: if request.auth.uid == resource.data.userId;
+    }
+
+    match /feedback/{feedbackId} {
+      allow read: if true;
+      allow create: if true;
+      allow update, delete: if false;
+    }
+  }
+}
