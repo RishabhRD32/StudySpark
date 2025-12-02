@@ -6,7 +6,7 @@ const firebaseConfig = {
   "projectId": "studyspark-snfha",
   "appId": "1:1070228110188:web:fc043710f33959e4415149",
   "storageBucket": "studyspark-snfha.firebasestorage.app",
-  "apiKey": "AIzaSyBgrftpzv3gHt2nwvnqz77X4GM-_edIef8",
+  "apiKey": "GEMINI-API-KEY",
   "authDomain": "studyspark-snfha.firebaseapp.com",
   "measurementId": "",
   "messagingSenderId": "1070228110188"
